@@ -32,7 +32,7 @@ const MODES: Record<TimerMode, ModeConfig> = {
   },
   shortBreak: {
     label: "短休息",
-    duration: 5, // Changed to 5 seconds for testing
+    duration: 5, // 5 seconds for testing
     icon: <Coffee className="w-5 h-5" />,
     colorClass: "text-emerald-400",
     bgClass: "bg-emerald-400",
@@ -57,7 +57,7 @@ export function PomodoroTimer() {
   const [timeLeft, setTimeLeft] = useState(MODES.focus.duration)
   const [isRunning, setIsRunning] = useState(false)
   const [completedSessions, setCompletedSessions] = useState(0)
-  const [showModal, setShowModal] = useState(false)
+  const [isFinished, setIsFinished] = useState(false)
   const [audio, setAudio] = useState<HTMLAudioElement | null>(null)
 
   const currentMode = MODES[mode]
@@ -69,26 +69,43 @@ export function PomodoroTimer() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
   }
 
+  // Request notification permission on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      Notification.requestPermission().catch((error) => {
+        console.error("Error requesting notification permission:", error)
+      })
+    }
+  }, [])
+
+  // Initialize audio object once
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const notificationSound = new Audio("https://github.com/maykbrito/libs/raw/master/sounds/notification.mp3")
+      setAudio(notificationSound)
+    }
+  }, [])
+
   const handleModeChange = useCallback((newMode: TimerMode) => {
     setMode(newMode)
     setTimeLeft(MODES[newMode].duration)
     setIsRunning(false)
+    setIsFinished(false)
     if (audio) {
       audio.pause()
       audio.currentTime = 0
     }
-    setShowModal(false)
   }, [audio])
 
   const handleToggle = () => setIsRunning((prev) => !prev)
   const handleReset = () => {
     setTimeLeft(currentMode.duration)
     setIsRunning(false)
+    setIsFinished(false)
     if (audio) {
       audio.pause()
       audio.currentTime = 0
     }
-    setShowModal(false)
   }
 
   const handleStopSound = () => {
@@ -96,9 +113,10 @@ export function PomodoroTimer() {
       audio.pause()
       audio.currentTime = 0
     }
-    setShowModal(false)
+    setIsFinished(false)
   }
 
+  // Timer logic
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null
 
@@ -120,24 +138,33 @@ export function PomodoroTimer() {
     }
   }, [isRunning, timeLeft])
 
-  // Handle timer completion
+  // Handle timer completion - only trigger once when timer hits 0
   useEffect(() => {
-    if (timeLeft === 0 && !showModal) {
+    // Only trigger when timer reaches 0, hasn't been finished yet, and is not running
+    if (timeLeft === 0 && !isFinished && !isRunning) {
+      setIsFinished(true)
+      
+      // Update completed sessions
       if (mode === "focus") {
         setCompletedSessions((prev) => prev + 1)
       }
-      
-      // Play sound and show modal
-      if (typeof window !== "undefined") {
-        const notificationSound = new Audio("https://github.com/maykbrito/libs/raw/master/sounds/notification.mp3")
-        notificationSound.play().catch((error) => {
+
+      // Play sound
+      if (audio) {
+        audio.play().catch((error) => {
           console.error("Error playing sound:", error)
         })
-        setAudio(notificationSound)
-        setShowModal(true)
+      }
+
+      // Show browser notification
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+        new Notification("Time is up!", {
+          body: mode === "focus" ? "Great job! Time for a break." : "Break is over! Time to focus.",
+          icon: "/icon.svg",
+        })
       }
     }
-  }, [timeLeft, mode, showModal])
+  }, [timeLeft, isFinished, isRunning, mode, audio])
 
   // Cleanup audio on unmount
   useEffect(() => {
@@ -148,6 +175,14 @@ export function PomodoroTimer() {
       }
     }
   }, [audio])
+
+  // Get modal message based on mode
+  const getModalMessage = () => {
+    if (mode === "focus") {
+      return "Great job! Time for a break."
+    }
+    return "Break is over! Time to focus."
+  }
 
   return (
     <div className={cn("min-h-screen flex flex-col items-center justify-center p-6 transition-colors duration-500", currentMode.backgroundClass)}>
@@ -270,7 +305,7 @@ export function PomodoroTimer() {
       </p>
 
       {/* Modal */}
-      {showModal && (
+      {isFinished && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           {/* Backdrop */}
           <div 
@@ -282,7 +317,7 @@ export function PomodoroTimer() {
           <div className="relative z-50 w-full max-w-md bg-card border border-border rounded-2xl shadow-2xl p-8 transform transition-all duration-300 ease-out">
             <div className="text-center space-y-4">
               <h2 className="text-3xl font-bold text-foreground">Time is up!</h2>
-              <p className="text-lg text-muted-foreground">Take a breath.</p>
+              <p className="text-lg text-muted-foreground">{getModalMessage()}</p>
               <button
                 onClick={handleStopSound}
                 className={cn(
