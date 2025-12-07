@@ -1,12 +1,12 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Play, Pause, RotateCcw } from "lucide-react";
+import { Play, Pause, RotateCcw, Share, X } from "lucide-react";
 
 export default function Pomodoro() {
-  // --- 1. 配置参数 (全部调整为 5秒 方便测试) ---
+  // --- 配置 ---
   const MODES = {
-    focus: 5, 
+    focus: 5, // 测试用 5秒，正式用请改为 25 * 60
     short: 5, 
     long: 5, 
   };
@@ -17,39 +17,49 @@ export default function Pomodoro() {
     long: "深度休息",
   };
 
-  // --- 2. 状态管理 ---
+  // --- 状态 ---
   const [mode, setMode] = useState<"focus" | "short" | "long">("focus");
   const [timeLeft, setTimeLeft] = useState(MODES.focus);
   const [isActive, setIsActive] = useState(false);
   const [showModal, setShowModal] = useState(false);
-  
-  // 专注次数 (初始化为0，避免服务端渲染不一致)
   const [completedCycles, setCompletedCycles] = useState(0);
+  
+  // 新增：控制安装引导弹窗
+  const [showInstallGuide, setShowInstallGuide] = useState(false);
+  // 新增：用于后台保活的静音音频
+  const silentAudioRef = useRef<HTMLAudioElement | null>(null);
+  // 新增：结束时间的“绝对时间戳” (解决后台时间停止问题)
+  const endTimeRef = useRef<number | null>(null);
 
-  // 音频上下文引用
+  // 音频上下文 (用于播放提示音)
   const audioCtxRef = useRef<AudioContext | null>(null);
 
-  // --- 3. 初始化：读取本地存储 & 权限 ---
+  // --- 初始化 ---
   useEffect(() => {
-    // A. 读取 LocalStorage (数据持久化)
+    // 读取本地存储
     const saved = localStorage.getItem("pomodoro_cycles");
-    if (saved) {
-      // 检查是不是“今天”的数据，如果不是则清零 (可选优化)，这里简单处理先只读
-      setCompletedCycles(parseInt(saved, 10));
-    }
+    if (saved) setCompletedCycles(parseInt(saved, 10));
 
-    // B. 请求通知权限
+    // 请求通知权限 (iOS PWA 必须添加到桌面后才有效)
     if ("Notification" in window && Notification.permission !== "granted") {
       Notification.requestPermission();
     }
+
+    // 初始化静音音频 (黑科技：循环播放空白音，防止手机锁屏杀后台)
+    // 这是一段 1秒钟的完全静音 MP3 base64
+    const silentBase64 = "data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbQAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV6urq6urq6urq6urq6urq6urq6urq6urq6v////////////////////////////////8AAAAATGF2YzU4LjU0AAAAAAAAAAAAAAAAJAAAAAAAAAAAASAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAA";
+    silentAudioRef.current = new Audio(silentBase64);
+    if(silentAudioRef.current) {
+      silentAudioRef.current.loop = true;
+      silentAudioRef.current.volume = 0.01; // 极小音量
+    }
   }, []);
 
-  // 当 completedCycles 变化时，保存到本地
   useEffect(() => {
     localStorage.setItem("pomodoro_cycles", completedCycles.toString());
   }, [completedCycles]);
 
-  // --- 🔊 4. 音效引擎：清脆悦耳的“叮”声 ---
+  // --- 🔊 提示音引擎 ---
   const playBeautifulChime = () => {
     try {
       if (!audioCtxRef.current) {
@@ -63,68 +73,111 @@ export default function Pomodoro() {
       const osc = ctx.createOscillator();
       const gainNode = ctx.createGain();
 
-      // 使用正弦波，声音更纯净
       osc.type = "sine";
-      
-      // 🌟 关键修改：保持频率稳定 (E6 - 1318.51 Hz)，不再降调
       osc.frequency.setValueAtTime(1318.51, t); 
-      
-      // 音量包络：快速冲击 -> 缓慢衰减 (模拟敲击声)
       gainNode.gain.setValueAtTime(0, t);
-      gainNode.gain.linearRampToValueAtTime(0.3, t + 0.01); // 瞬间起音
-      gainNode.gain.exponentialRampToValueAtTime(0.001, t + 2.5); // 2.5秒悠长余音
+      gainNode.gain.linearRampToValueAtTime(0.5, t + 0.01);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, t + 3);
 
       osc.connect(gainNode);
       gainNode.connect(ctx.destination);
       osc.start(t);
-      osc.stop(t + 3); // 3秒后彻底停止
+      osc.stop(t + 3.5);
 
     } catch (e) {
       console.error("Audio error:", e);
     }
   };
 
-  // --- 5. 计时逻辑 ---
+  // --- ⏱️ 核心计时逻辑 (升级版：时间戳校准) ---
   useEffect(() => {
     let interval: NodeJS.Timeout;
 
-    if (isActive && timeLeft > 0) {
+    if (isActive) {
+      // 如果刚开始，设定一个未来的结束时间戳
+      if (!endTimeRef.current) {
+        endTimeRef.current = Date.now() + timeLeft * 1000;
+      }
+
       interval = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
+        if (!endTimeRef.current) return;
+        
+        // 计算剩余时间 = 目标时间 - 当前真实时间
+        // 这样即使锁屏，只要代码还能跑一下，时间就是准的
+        const now = Date.now();
+        const diff = Math.ceil((endTimeRef.current - now) / 1000);
+
+        if (diff <= 0) {
+          setTimeLeft(0);
+          finishTimer();
+          clearInterval(interval);
+        } else {
+          setTimeLeft(diff);
+        }
       }, 1000);
-    } else if (timeLeft === 0 && isActive) {
-      finishTimer();
+    } else {
+      // 暂停时，清除结束时间戳，这样下次开始会重新计算
+      endTimeRef.current = null;
     }
 
     return () => clearInterval(interval);
-  }, [isActive, timeLeft]);
+  }, [isActive]); // 这里移除了 timeLeft 依赖，改为依赖内部计算
 
   const finishTimer = () => {
     setIsActive(false);
+    endTimeRef.current = null;
     setShowModal(true);
     playBeautifulChime();
+    
+    // 停止静音保活循环
+    silentAudioRef.current?.pause();
 
-    // 通知逻辑
+    // 尝试发送系统级通知 (锁屏可见)
+    // 注意：iOS 需要 App 被添加到桌面 (PWA) 才能支持 Notification API
     if (Notification.permission === "granted") {
-      new Notification("⏰ 计时结束！", { body: getModalMessage() });
+      // 尝试在 ServiceWorker 注册的情况下发送 (更高级)，或者普通发送
+      // 这里使用普通发送，部分新版 iOS 支持
+      try {
+        new Notification("⏰ 计时结束！", { 
+          body: getModalMessage(),
+          icon: "/icon.svg",
+          vibrate: [200, 100, 200]
+        });
+      } catch (e) { console.log("Notification failed", e); }
     }
 
-    // 专注模式结束，增加计数
     if (mode === "focus") {
       setCompletedCycles(prev => prev + 1);
     }
   };
 
-  // --- 6. 交互函数 ---
+  // --- 交互 ---
   const toggleTimer = () => {
-    // 预加载音频上下文，解锁自动播放
-    if (!audioCtxRef.current) {
-      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-      audioCtxRef.current = new AudioContext();
+    // 1. 启动/停止 静音保活音频
+    if (!isActive) {
+      // 开始计时：播放静音，欺骗系统
+      silentAudioRef.current?.play().catch(() => {});
+      
+      // 预热提示音上下文
+      if (!audioCtxRef.current) {
+        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+        audioCtxRef.current = new AudioContext();
+      }
+      if (audioCtxRef.current?.state === 'suspended') {
+        audioCtxRef.current.resume();
+      }
+    } else {
+      // 暂停计时：停止静音
+      silentAudioRef.current?.pause();
+      // 更新当前的 timeLeft，防止暂停后再开始时间跳跃
+      if (endTimeRef.current) {
+        const now = Date.now();
+        const diff = Math.ceil((endTimeRef.current - now) / 1000);
+        setTimeLeft(diff > 0 ? diff : 0);
+      }
+      endTimeRef.current = null;
     }
-    if (audioCtxRef.current?.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
+    
     setIsActive(!isActive);
   };
 
@@ -132,17 +185,21 @@ export default function Pomodoro() {
     setMode(newMode);
     setTimeLeft(MODES[newMode]);
     setIsActive(false);
+    endTimeRef.current = null;
     setShowModal(false);
+    silentAudioRef.current?.pause();
   };
 
   const resetTimer = () => {
     setIsActive(false);
+    endTimeRef.current = null;
     setTimeLeft(MODES[mode]);
+    silentAudioRef.current?.pause();
   };
 
   const closeModal = () => {
     setShowModal(false);
-    setTimeLeft(MODES[mode]); // 关闭后重置时间
+    setTimeLeft(MODES[mode]);
   };
 
   const formatTime = (seconds: number) => {
@@ -151,45 +208,37 @@ export default function Pomodoro() {
     return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
-  // --- 7. 文案与样式 ---
-  const getModalTitle = () => {
-    if (mode === "focus") return "专注完成！";
-    if (mode === "long") return "深度休息结束";
-    return "小憩结束";
-  };
+  const getModalTitle = () => mode === "focus" ? "专注完成！" : "休息结束";
+  const getModalMessage = () => mode === "focus" ? "太棒了！放下工作，站起来伸个懒腰吧。" : "电量已充满！准备好出发了吗？";
+  const getGradient = () => mode === "focus" ? "from-orange-50 to-red-100" : mode === "short" ? "from-emerald-50 to-teal-100" : "from-blue-50 to-indigo-100";
+  const getTextColor = () => mode === "focus" ? "text-orange-950" : mode === "short" ? "text-teal-950" : "text-indigo-950";
 
-  const getModalMessage = () => {
-    if (mode === "focus") return "太棒了！放下工作，站起来伸个懒腰吧。";
-    if (mode === "long") return "电量已完全充满！准备好迎接新的挑战了吗？";
-    return "休息时间到，准备回到心流状态。";
-  };
-
-  const getGradient = () => {
-    if (mode === "focus") return "from-orange-50 to-red-100";
-    if (mode === "short") return "from-emerald-50 to-teal-100";
-    return "from-blue-50 to-indigo-100";
-  };
-
-  const getTextColor = () => {
-    if (mode === "focus") return "text-orange-950";
-    if (mode === "short") return "text-teal-950";
-    return "text-indigo-950";
-  };
+  // 检测是否为 iOS 设备 (用于显示不同的安装教程)
+  const isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent);
 
   return (
-    <main className={`flex min-h-screen flex-col items-center justify-center p-6 bg-gradient-to-br ${getGradient()} transition-all duration-700`}>
+    <main className={`flex min-h-screen flex-col items-center justify-center p-6 bg-gradient-to-br ${getGradient()} transition-all duration-700 relative`}>
       
-      {/* 顶部标题与价值主张 (新增) */}
-      <div className="text-center mb-10 animate-in slide-in-from-top duration-700">
+      {/* 右上角：添加到主屏幕按钮 */}
+      <button 
+        onClick={() => setShowInstallGuide(true)}
+        className="absolute top-6 right-6 p-2 rounded-full bg-black/5 hover:bg-black/10 transition-colors text-black/60"
+        title="安装到手机"
+      >
+        <Share size={20} />
+      </button>
+
+      {/* 标题 */}
+      <div className="text-center mb-10 animate-in slide-in-from-top duration-700 mt-8">
         <h1 className={`text-3xl font-bold tracking-tight mb-2 ${getTextColor()}`}>
           专注番茄钟
         </h1>
         <p className="text-black/40 text-sm font-medium tracking-wide">
-          保持心流，适时休息，成就更多
+          保持心流，适时休息
         </p>
       </div>
 
-      {/* 顶部切换 */}
+      {/* 切换栏 */}
       <div className="bg-black/5 backdrop-blur-xl p-1 rounded-full flex mb-12 shadow-sm">
         {(["focus", "short", "long"] as const).map((m) => (
           <button
@@ -197,9 +246,7 @@ export default function Pomodoro() {
             onClick={() => switchMode(m)}
             className={`
               px-6 py-2 rounded-full text-sm font-medium transition-all duration-300
-              ${mode === m 
-                ? "bg-white text-black shadow-md scale-100" 
-                : "text-black/50 hover:bg-black/5 scale-95"}
+              ${mode === m ? "bg-white text-black shadow-md scale-100" : "text-black/50 hover:bg-black/5 scale-95"}
             `}
           >
             {MODE_LABELS[m]}
@@ -219,7 +266,7 @@ export default function Pomodoro() {
 
       {/* 按钮组 */}
       <div className="flex items-center gap-6">
-        <button onClick={resetTimer} className="w-14 h-14 rounded-full bg-white/40 hover:bg-white/60 backdrop-blur-md flex items-center justify-center text-black/60 transition-all active:scale-95" title="重置">
+        <button onClick={resetTimer} className="w-14 h-14 rounded-full bg-white/40 hover:bg-white/60 backdrop-blur-md flex items-center justify-center text-black/60 transition-all active:scale-95">
           <RotateCcw size={20} />
         </button>
 
@@ -234,44 +281,71 @@ export default function Pomodoro() {
         </button>
       </div>
 
-      {/* 专注循环 (数据持久化) */}
+      {/* 底部圆点 */}
       <div className="mt-16 flex flex-col items-center gap-3">
-        <div className="text-black/30 text-xs font-semibold tracking-widest uppercase">
-          今日专注循环
-        </div>
+        <div className="text-black/30 text-xs font-semibold tracking-widest uppercase">今日专注循环</div>
         <div className="flex gap-3">
           {[...Array(4)].map((_, i) => (
-            <div
-              key={i}
-              className={`
-                w-4 h-4 rounded-full border-2 transition-all duration-500
-                ${i < completedCycles % 4 
-                  ? "bg-black border-black scale-110" 
-                  : "bg-transparent border-black/20 scale-100"}
-              `}
-            />
+            <div key={i} className={`w-4 h-4 rounded-full border-2 transition-all duration-500 ${i < completedCycles % 4 ? "bg-black border-black scale-110" : "bg-transparent border-black/20 scale-100"}`} />
           ))}
         </div>
-        <div className="text-xs text-black/30 mt-2">
-           累计完成 {completedCycles} 次专注
-        </div>
+        <div className="text-xs text-black/30 mt-2">累计完成 {completedCycles} 次</div>
       </div>
 
-      {/* 弹窗 */}
+      {/* 计时结束弹窗 */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/20 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white/90 backdrop-blur-xl p-8 rounded-[2rem] shadow-2xl max-w-sm w-full text-center border border-white/50 transform scale-100">
-            <h2 className="text-2xl font-semibold mb-2 text-black">
-              {getModalTitle()}
-            </h2>
-            <p className="text-black/60 mb-8 leading-relaxed">
-              {getModalMessage()}
-            </p>
-            <button
-              onClick={closeModal}
-              className="w-full py-4 rounded-xl bg-black text-white font-medium text-lg hover:scale-[1.02] active:scale-[0.98] transition-all shadow-lg"
-            >
+          <div className="bg-white/90 backdrop-blur-xl p-8 rounded-[2rem] shadow-2xl max-w-sm w-full text-center border border-white/50">
+            <h2 className="text-2xl font-semibold mb-2 text-black">{getModalTitle()}</h2>
+            <p className="text-black/60 mb-8 leading-relaxed">{getModalMessage()}</p>
+            <button onClick={closeModal} className="w-full py-4 rounded-xl bg-black text-white font-medium text-lg hover:scale-[1.02] active:scale-[0.98] transition-all shadow-lg">
               我知道了
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 安装引导弹窗 (Add to Home Screen) */}
+      {showInstallGuide && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setShowInstallGuide(false)}>
+          <div className="bg-white p-6 rounded-t-[2rem] sm:rounded-[2rem] shadow-2xl w-full max-w-sm text-center relative" onClick={e => e.stopPropagation()}>
+            <button onClick={() => setShowInstallGuide(false)} className="absolute top-4 right-4 p-2 text-black/30 hover:text-black">
+              <X size={20} />
+            </button>
+            <div className="w-16 h-16 bg-gradient-to-tr from-orange-400 to-red-500 rounded-2xl mx-auto mb-4 shadow-lg flex items-center justify-center text-white text-2xl font-bold">🍅</div>
+            <h3 className="text-xl font-bold mb-2 text-black">安装 App 到手机</h3>
+            <p className="text-black/60 text-sm mb-6">
+              为了获得最佳体验（全屏运行 + 后台提醒），请将应用添加到主屏幕。
+            </p>
+            
+            {/* iOS 指引 */}
+            {isIOS ? (
+              <div className="bg-gray-50 rounded-xl p-4 text-left space-y-3 text-sm text-black/70">
+                <div className="flex items-center gap-3">
+                  <span className="w-6 h-6 flex items-center justify-center bg-gray-200 rounded-full text-xs font-bold">1</span>
+                  <span>点击底部浏览器的 <Share size={14} className="inline mx-1" /> 分享按钮</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="w-6 h-6 flex items-center justify-center bg-gray-200 rounded-full text-xs font-bold">2</span>
+                  <span>向下滑动，选择 <strong>"添加到主屏幕"</strong></span>
+                </div>
+              </div>
+            ) : (
+               /* 安卓/其他指引 */
+              <div className="bg-gray-50 rounded-xl p-4 text-left space-y-3 text-sm text-black/70">
+                <div className="flex items-center gap-3">
+                  <span className="w-6 h-6 flex items-center justify-center bg-gray-200 rounded-full text-xs font-bold">1</span>
+                  <span>点击浏览器右上角的菜单 (⋮)</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="w-6 h-6 flex items-center justify-center bg-gray-200 rounded-full text-xs font-bold">2</span>
+                  <span>选择 <strong>"安装应用"</strong> 或 <strong>"添加到主屏幕"</strong></span>
+                </div>
+              </div>
+            )}
+            
+            <button onClick={() => setShowInstallGuide(false)} className="w-full mt-6 py-3 rounded-xl bg-black/5 hover:bg-black/10 font-medium text-black transition-all">
+              关闭
             </button>
           </div>
         </div>
