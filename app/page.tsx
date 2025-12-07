@@ -1,14 +1,14 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Play, Pause, RotateCcw, CheckCircle2 } from "lucide-react";
+import { Play, Pause, RotateCcw } from "lucide-react";
 
 export default function Pomodoro() {
-  // --- 1. 配置参数 ---
+  // --- 1. 配置参数 (全部调整为 5秒 方便测试) ---
   const MODES = {
-    focus: 25 * 60,
-    short: 5, // 保持 5秒 方便测试
-    long: 15 * 60,
+    focus: 5, 
+    short: 5, 
+    long: 5, 
   };
 
   const MODE_LABELS = {
@@ -23,23 +23,68 @@ export default function Pomodoro() {
   const [isActive, setIsActive] = useState(false);
   const [showModal, setShowModal] = useState(false);
   
-  // 专注次数统计 (找回丢失的功能)
+  // 专注次数 (初始化为0，避免服务端渲染不一致)
   const [completedCycles, setCompletedCycles] = useState(0);
 
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  // 音频上下文引用
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
-  // --- 3. 初始化与权限 ---
+  // --- 3. 初始化：读取本地存储 & 权限 ---
   useEffect(() => {
-    // 使用一个更稳定、清脆的“叮”声
-    audioRef.current = new Audio("https://assets.mixkit.co/sfx/preview/mixkit-software-interface-start-2574.mp3");
-    audioRef.current.preload = "auto"; // 强制预加载
+    // A. 读取 LocalStorage (数据持久化)
+    const saved = localStorage.getItem("pomodoro_cycles");
+    if (saved) {
+      // 检查是不是“今天”的数据，如果不是则清零 (可选优化)，这里简单处理先只读
+      setCompletedCycles(parseInt(saved, 10));
+    }
 
+    // B. 请求通知权限
     if ("Notification" in window && Notification.permission !== "granted") {
       Notification.requestPermission();
     }
   }, []);
 
-  // --- 4. 计时核心逻辑 ---
+  // 当 completedCycles 变化时，保存到本地
+  useEffect(() => {
+    localStorage.setItem("pomodoro_cycles", completedCycles.toString());
+  }, [completedCycles]);
+
+  // --- 🔊 4. 音效引擎：清脆悦耳的“叮”声 ---
+  const playBeautifulChime = () => {
+    try {
+      if (!audioCtxRef.current) {
+        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+        audioCtxRef.current = new AudioContext();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      const t = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+
+      // 使用正弦波，声音更纯净
+      osc.type = "sine";
+      
+      // 🌟 关键修改：保持频率稳定 (E6 - 1318.51 Hz)，不再降调
+      osc.frequency.setValueAtTime(1318.51, t); 
+      
+      // 音量包络：快速冲击 -> 缓慢衰减 (模拟敲击声)
+      gainNode.gain.setValueAtTime(0, t);
+      gainNode.gain.linearRampToValueAtTime(0.3, t + 0.01); // 瞬间起音
+      gainNode.gain.exponentialRampToValueAtTime(0.001, t + 2.5); // 2.5秒悠长余音
+
+      osc.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 3); // 3秒后彻底停止
+
+    } catch (e) {
+      console.error("Audio error:", e);
+    }
+  };
+
+  // --- 5. 计时逻辑 ---
   useEffect(() => {
     let interval: NodeJS.Timeout;
 
@@ -48,44 +93,37 @@ export default function Pomodoro() {
         setTimeLeft((prev) => prev - 1);
       }, 1000);
     } else if (timeLeft === 0 && isActive) {
-      // === 倒计时结束 ===
       finishTimer();
     }
 
     return () => clearInterval(interval);
   }, [isActive, timeLeft]);
 
-  // 结束时的处理
   const finishTimer = () => {
-    setIsActive(false); // 停止计时
-    setShowModal(true); // 弹窗
+    setIsActive(false);
+    setShowModal(true);
+    playBeautifulChime();
 
-    // 播放声音 (重置进度，防止上次没播完)
-    if (audioRef.current) {
-      audioRef.current.currentTime = 0;
-      audioRef.current.play().catch(e => console.error("播放失败", e));
-    }
-
-    // 发送通知
+    // 通知逻辑
     if (Notification.permission === "granted") {
-      new Notification("⏰ 计时结束！", { 
-        body: mode === 'focus' ? "专注完成，休息一下吧！" : "休息结束，准备开始！" 
-      });
+      new Notification("⏰ 计时结束！", { body: getModalMessage() });
     }
 
-    // 如果是专注模式结束，增加计数
+    // 专注模式结束，增加计数
     if (mode === "focus") {
       setCompletedCycles(prev => prev + 1);
     }
   };
 
-  // --- 5. 交互函数 ---
-  
-  // 点击“开始”时，尝试激活音频（解决手机端无法自动播放的问题）
+  // --- 6. 交互函数 ---
   const toggleTimer = () => {
-    if (!isActive && audioRef.current) {
-      // 播放一个极短的静音或加载，骗过浏览器的“自动播放策略”
-      audioRef.current.load();
+    // 预加载音频上下文，解锁自动播放
+    if (!audioCtxRef.current) {
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      audioCtxRef.current = new AudioContext();
+    }
+    if (audioCtxRef.current?.state === 'suspended') {
+      audioCtxRef.current.resume();
     }
     setIsActive(!isActive);
   };
@@ -104,12 +142,7 @@ export default function Pomodoro() {
 
   const closeModal = () => {
     setShowModal(false);
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
-    // 自动重置时间
-    setTimeLeft(MODES[mode]);
+    setTimeLeft(MODES[mode]); // 关闭后重置时间
   };
 
   const formatTime = (seconds: number) => {
@@ -118,12 +151,23 @@ export default function Pomodoro() {
     return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
-  // --- 6. 视觉样式 (Apple Style) ---
-  // 根据模式改变背景渐变，模拟 iOS 动态壁纸效果
+  // --- 7. 文案与样式 ---
+  const getModalTitle = () => {
+    if (mode === "focus") return "专注完成！";
+    if (mode === "long") return "深度休息结束";
+    return "小憩结束";
+  };
+
+  const getModalMessage = () => {
+    if (mode === "focus") return "太棒了！放下工作，站起来伸个懒腰吧。";
+    if (mode === "long") return "电量已完全充满！准备好迎接新的挑战了吗？";
+    return "休息时间到，准备回到心流状态。";
+  };
+
   const getGradient = () => {
-    if (mode === "focus") return "from-orange-50 to-red-100"; // 暖色调
-    if (mode === "short") return "from-emerald-50 to-teal-100"; // 清新绿
-    return "from-blue-50 to-indigo-100"; // 深邃蓝
+    if (mode === "focus") return "from-orange-50 to-red-100";
+    if (mode === "short") return "from-emerald-50 to-teal-100";
+    return "from-blue-50 to-indigo-100";
   };
 
   const getTextColor = () => {
@@ -135,7 +179,17 @@ export default function Pomodoro() {
   return (
     <main className={`flex min-h-screen flex-col items-center justify-center p-6 bg-gradient-to-br ${getGradient()} transition-all duration-700`}>
       
-      {/* 顶部胶囊切换栏 (iOS Segmented Control 风格) */}
+      {/* 顶部标题与价值主张 (新增) */}
+      <div className="text-center mb-10 animate-in slide-in-from-top duration-700">
+        <h1 className={`text-3xl font-bold tracking-tight mb-2 ${getTextColor()}`}>
+          专注番茄钟
+        </h1>
+        <p className="text-black/40 text-sm font-medium tracking-wide">
+          保持心流，适时休息，成就更多
+        </p>
+      </div>
+
+      {/* 顶部切换 */}
       <div className="bg-black/5 backdrop-blur-xl p-1 rounded-full flex mb-12 shadow-sm">
         {(["focus", "short", "long"] as const).map((m) => (
           <button
@@ -153,27 +207,19 @@ export default function Pomodoro() {
         ))}
       </div>
 
-      {/* 核心区域：时钟 + 按钮 */}
+      {/* 时钟 */}
       <div className="flex flex-col items-center gap-8 mb-16 relative">
-        
-        {/* iOS 风格的超大细体时间 */}
         <div className={`text-[8rem] font-light tracking-tighter tabular-nums leading-none ${getTextColor()} drop-shadow-sm`}>
           {formatTime(timeLeft)}
         </div>
-
-        {/* 状态提示文案 */}
         <div className="absolute -bottom-8 text-black/40 font-medium tracking-wide text-sm uppercase">
           {isActive ? "正在计时..." : "等待开始"}
         </div>
       </div>
 
-      {/* 控制按钮组 (更紧凑) */}
+      {/* 按钮组 */}
       <div className="flex items-center gap-6">
-        <button
-          onClick={resetTimer}
-          className="w-14 h-14 rounded-full bg-white/40 hover:bg-white/60 backdrop-blur-md flex items-center justify-center text-black/60 transition-all active:scale-95"
-          title="重置"
-        >
+        <button onClick={resetTimer} className="w-14 h-14 rounded-full bg-white/40 hover:bg-white/60 backdrop-blur-md flex items-center justify-center text-black/60 transition-all active:scale-95" title="重置">
           <RotateCcw size={20} />
         </button>
 
@@ -188,7 +234,7 @@ export default function Pomodoro() {
         </button>
       </div>
 
-      {/* 底部：进度追踪 (找回的功能) */}
+      {/* 专注循环 (数据持久化) */}
       <div className="mt-16 flex flex-col items-center gap-3">
         <div className="text-black/30 text-xs font-semibold tracking-widest uppercase">
           今日专注循环
@@ -206,28 +252,26 @@ export default function Pomodoro() {
             />
           ))}
         </div>
-        <p className="text-xs text-black/30 mt-2">
-          {completedCycles > 0 && completedCycles % 4 === 0 
-            ? "太棒了！建议进行一次长休息 ☕️" 
-            : `再完成 ${4 - (completedCycles % 4)} 个番茄即可长休`}
-        </p>
+        <div className="text-xs text-black/30 mt-2">
+           累计完成 {completedCycles} 次专注
+        </div>
       </div>
 
-      {/* --- 极简弹窗 --- */}
+      {/* 弹窗 */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/20 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white/90 backdrop-blur-xl p-8 rounded-[2rem] shadow-2xl max-w-sm w-full text-center border border-white/50">
+          <div className="bg-white/90 backdrop-blur-xl p-8 rounded-[2rem] shadow-2xl max-w-sm w-full text-center border border-white/50 transform scale-100">
             <h2 className="text-2xl font-semibold mb-2 text-black">
-              {mode === "focus" ? "时间到" : "休息结束"}
+              {getModalTitle()}
             </h2>
-            <p className="text-black/50 mb-8">
-              {mode === "focus" ? "很棒，放下工作休息一下。" : "电量已充满，准备出发！"}
+            <p className="text-black/60 mb-8 leading-relaxed">
+              {getModalMessage()}
             </p>
             <button
               onClick={closeModal}
               className="w-full py-4 rounded-xl bg-black text-white font-medium text-lg hover:scale-[1.02] active:scale-[0.98] transition-all shadow-lg"
             >
-              停止响铃
+              我知道了
             </button>
           </div>
         </div>
