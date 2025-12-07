@@ -32,7 +32,7 @@ const MODES: Record<TimerMode, ModeConfig> = {
   },
   shortBreak: {
     label: "短休息",
-    duration: 5, // 5 seconds for testing
+    duration: 5 * 60,
     icon: <Coffee className="w-5 h-5" />,
     colorClass: "text-emerald-400",
     bgClass: "bg-emerald-400",
@@ -57,8 +57,6 @@ export function PomodoroTimer() {
   const [timeLeft, setTimeLeft] = useState(MODES.focus.duration)
   const [isRunning, setIsRunning] = useState(false)
   const [completedSessions, setCompletedSessions] = useState(0)
-  const [isFinished, setIsFinished] = useState(false)
-  const [audio, setAudio] = useState<HTMLAudioElement | null>(null)
 
   const currentMode = MODES[mode]
   const progress = ((currentMode.duration - timeLeft) / currentMode.duration) * 100
@@ -69,120 +67,39 @@ export function PomodoroTimer() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
   }
 
-  // Request notification permission on mount
-  useEffect(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      Notification.requestPermission().catch((error) => {
-        console.error("Error requesting notification permission:", error)
-      })
-    }
-  }, [])
-
-  // Initialize audio object once
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const notificationSound = new Audio("https://github.com/maykbrito/libs/raw/master/sounds/notification.mp3")
-      setAudio(notificationSound)
-    }
-  }, [])
-
   const handleModeChange = useCallback((newMode: TimerMode) => {
     setMode(newMode)
     setTimeLeft(MODES[newMode].duration)
     setIsRunning(false)
-    setIsFinished(false)
-    if (audio) {
-      audio.pause()
-      audio.currentTime = 0
-    }
-  }, [audio])
+  }, [])
 
   const handleToggle = () => setIsRunning((prev) => !prev)
   const handleReset = () => {
     setTimeLeft(currentMode.duration)
     setIsRunning(false)
-    setIsFinished(false)
-    if (audio) {
-      audio.pause()
-      audio.currentTime = 0
-    }
   }
 
-  const handleStopSound = () => {
-    if (audio) {
-      audio.pause()
-      audio.currentTime = 0
-    }
-    setIsFinished(false)
-  }
-
-  // Timer logic
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null
 
     if (isRunning && timeLeft > 0) {
       interval = setInterval(() => {
-        setTimeLeft((prev) => {
-          const newTime = prev - 1
-          if (newTime <= 0) {
-            setIsRunning(false)
-            return 0
-          }
-          return newTime
-        })
+        setTimeLeft((prev) => prev - 1)
       }, 1000)
+    } else if (timeLeft === 0) {
+      setIsRunning(false)
+      if (mode === "focus") {
+        setCompletedSessions((prev) => prev + 1)
+      }
+      if (typeof window !== "undefined") {
+        window.alert("Time is up!")
+      }
     }
 
     return () => {
       if (interval) clearInterval(interval)
     }
-  }, [isRunning, timeLeft])
-
-  // Handle timer completion - only trigger once when timer hits 0
-  useEffect(() => {
-    // Only trigger when timer reaches 0, hasn't been finished yet, and is not running
-    if (timeLeft === 0 && !isFinished && !isRunning) {
-      setIsFinished(true)
-      
-      // Update completed sessions
-      if (mode === "focus") {
-        setCompletedSessions((prev) => prev + 1)
-      }
-
-      // Play sound
-      if (audio) {
-        audio.play().catch((error) => {
-          console.error("Error playing sound:", error)
-        })
-      }
-
-      // Show browser notification
-      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-        new Notification("Time is up!", {
-          body: mode === "focus" ? "Great job! Time for a break." : "Break is over! Time to focus.",
-          icon: "/icon.svg",
-        })
-      }
-    }
-  }, [timeLeft, isFinished, isRunning, mode, audio])
-
-  // Cleanup audio on unmount
-  useEffect(() => {
-    return () => {
-      if (audio) {
-        audio.pause()
-        audio.currentTime = 0
-      }
-    }
-  }, [audio])
-
-  // Get modal message based on mode
-  const getModalMessage = () => {
-    if (mode === "focus") {
-      return "Great job! Time for a break."
-    }
-    return "Break is over! Time to focus."
-  }
+  }, [isRunning, timeLeft, mode])
 
   return (
     <div className={cn("min-h-screen flex flex-col items-center justify-center p-6 transition-colors duration-500", currentMode.backgroundClass)}>
@@ -303,40 +220,6 @@ export function PomodoroTimer() {
       <p className="mt-8 text-xs text-muted-foreground text-center max-w-xs">
         完成 4 个专注时段后，可获得一次长休息。坚持使用，效果更佳。
       </p>
-
-      {/* Modal */}
-      {isFinished && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          {/* Backdrop */}
-          <div 
-            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-            onClick={handleStopSound}
-          />
-          
-          {/* Modal Content */}
-          <div className="relative z-50 w-full max-w-md bg-card border border-border rounded-2xl shadow-2xl p-8 transform transition-all duration-300 ease-out">
-            <div className="text-center space-y-4">
-              <h2 className="text-3xl font-bold text-foreground">Time is up!</h2>
-              <p className="text-lg text-muted-foreground">{getModalMessage()}</p>
-              <button
-                onClick={handleStopSound}
-                className={cn(
-                  "mt-6 px-6 py-3 rounded-lg font-medium transition-all duration-200",
-                  "bg-primary text-primary-foreground hover:bg-primary/90",
-                  "focus:outline-none focus-visible:ring-4 focus-visible:ring-primary/20",
-                  "active:scale-95"
-                )}
-              >
-                Stop Sound
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
-}
-
-export default function Page() {
-  return <PomodoroTimer />
 }
